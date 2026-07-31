@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>Walls Board Game</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js"></script>
+    <style>
+      @font-face {
+        font-family: "Vazir";
+        src: url("https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-Regular.woff2")
+          format("woff2");
+      }
+      body {
+        font-family: "Vazir", sans-serif;
+        background-color: #121216;
+        color: #ffffff;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        touch-action: none;
+      }
+      #ui-layer {
+        position: absolute;
+        top: 15px;
+        left: 15px;
+        right: 15px;
+        display: flex;
+        justify-content: space-between;
+        z-index: 10;
+        pointer-events: none;
+      }
+      .badge {
+        background: rgba(43, 43, 54, 0.8);
+        border: 1px solid #444455;
+        color: #ffffff;
+        padding: 6px 16px;
+        border-radius: 12px;
+        font-weight: bold;
+        font-size: 13px;
+        backdrop-filter: blur(4px);
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+      }
+      /* مدال پایان بازی */
+      #winner-modal {
+        display: none;
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.85);
+        z-index: 100;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        backdrop-filter: blur(8px);
+      }
+      #winner-modal h1 {
+        font-size: 28px;
+        margin-bottom: 10px;
+      }
+      #winner-modal p {
+        font-size: 18px;
+        color: #aaa;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ui-layer">
+      <div id="role-badge" class="badge">در حال اتصال...</div>
+      <div id="walls-badge" class="badge">🟡 10 | 🔵 10</div>
+      <div id="status-badge" class="badge">صبر کنید...</div>
+    </div>
+
+    <!-- مدال اعلان برنده -->
+    <div id="winner-modal">
+      <h1 id="winner-title">🎉 بازیکن زرد برنده شد!</h1>
+      <p>بازی به پایان رسید</p>
+    </div>
+
+    <div id="game-container"></div>
+
+    <script>
+      const tg = window.Telegram.WebApp;
+      tg.expand();
+
+      const urlParams = new URLSearchParams(window.location.search);
+      const gameId =
+        tg.initDataUnsafe?.start_param || urlParams.get("room") || "testroom";
+
+      let userId = tg.initDataUnsafe?.user?.id
+        ? String(tg.initDataUnsafe.user.id)
+        : sessionStorage.getItem("walls_user_id");
+      if (!userId) {
+        userId = Math.random().toString(36).substring(2, 9);
+        sessionStorage.setItem("walls_user_id", userId);
+      }
+
+      let myRole = "watch";
+      let currentTurn = "p1";
+      let p1Walls = 10,
+        p2Walls = 10;
+      let gameScene = null;
+      let isGameOver = false;
+
+      let p1Pos = { col: 4, row: 8 };
+      let p2Pos = { col: 4, row: 0 };
+      let p1Sprite = null,
+        p2Sprite = null;
+      const placedWalls = [];
+
+      function updateRoleUI() {
+        const badge = document.getElementById("role-badge");
+        if (!badge) return;
+        let badgeText = "👁 تماشاچی";
+        if (myRole === "p1") {
+          badgeText = "🎮 شما: زرد (P1)";
+          badge.style.background = "#ffc107";
+          badge.style.color = "#000";
+        } else if (myRole === "p2") {
+          badgeText = "🎮 شما: آبی (P2)";
+          badge.style.background = "#3390ec";
+          badge.style.color = "#fff";
+        }
+        badge.innerText = badgeText;
+      }
+
+      function updateTurnUI() {
+        const badge = document.getElementById("status-badge");
+        if (!badge) return;
+        if (currentTurn === "p1") {
+          badge.innerText = "نوبت: 🟡 زرد";
+          badge.style.borderColor = "#ffc107";
+        } else {
+          badge.innerText = "نوبت: 🔵 آبی";
+          badge.style.borderColor = "#3390ec";
+        }
+      }
+
+      function updateWallsUI() {
+        const badge = document.getElementById("walls-badge");
+        if (badge) {
+          badge.innerText = `🟡 ${p1Walls} | 🔵 ${p2Walls}`;
+        }
+      }
+
+      function showWinnerModal(winner) {
+        isGameOver = true;
+        const modal = document.getElementById("winner-modal");
+        const title = document.getElementById("winner-title");
+        if (winner === "p1") {
+          title.innerText = "🟡 بازیکن زرد برنده شد!";
+          title.style.color = "#ffc107";
+        } else {
+          title.innerText = "🔵 بازیکن آبی برنده شد!";
+          title.style.color = "#3390ec";
+        }
+        modal.style.display = "flex";
+      }
+
+      function safeVibrate(type) {
+        try {
+          if (tg && tg.HapticFeedback) {
+            if (type === "error")
+              tg.HapticFeedback.notificationOccurred("error");
+            else tg.HapticFeedback.impactOccurred(type);
+          }
+        } catch (e) {}
+      }
+
+      const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const host = window.location.host || "localhost:8080";
+      const ws = new WebSocket(`${wsProtocol}//${host}/ws/${gameId}/${userId}`);
+
+      ws.onopen = () => {
+        updateTurnUI();
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.type === "error") {
+          safeVibrate("error");
+          return;
+        }
+
+        if (data.type === "init") {
+          myRole = data.role;
+          currentTurn = data.current_turn || "p1";
+          p1Walls = data.p1_walls ?? 10;
+          p2Walls = data.p2_walls ?? 10;
+          updateRoleUI();
+          updateTurnUI();
+          updateWallsUI();
+
+          if (data.is_game_over) {
+            showWinnerModal(data.winner);
+          }
+          return;
+        }
+
+        if (data.p1_walls !== undefined) p1Walls = data.p1_walls;
+        if (data.p2_walls !== undefined) p2Walls = data.p2_walls;
+        updateWallsUI();
+
+        if (data.next_turn) {
+          currentTurn = data.next_turn;
+          updateTurnUI();
+        }
+
+        if (data.type === "move") {
+          const pos = data.player_role === "p1" ? p1Pos : p2Pos;
+          pos.col = data.col;
+          pos.row = data.row;
+
+          if (gameScene) {
+            const sprite = data.player_role === "p1" ? p1Sprite : p2Sprite;
+            const newPixelPos = getPixelPos(data.col, data.row);
+            gameScene.tweens.add({
+              targets: sprite,
+              x: newPixelPos.x,
+              y: newPixelPos.y,
+              duration: 200,
+              ease: "Power2",
+            });
+            safeVibrate("light");
+          }
+
+          if (data.is_game_over) {
+            showWinnerModal(data.winner);
+          }
+        } else if (data.type === "wall") {
+          placedWalls.push({
+            r: data.r,
+            c: data.c,
+            orientation: data.orientation,
+          });
+
+          if (gameScene) {
+            const wallPixelPos = getWallPixelPos(data.r, data.c);
+            const texture = data.orientation === "H" ? "hWall" : "vWall";
+            gameScene.add
+              .sprite(wallPixelPos.x, wallPixelPos.y, texture)
+              .setOrigin(0.5);
+            safeVibrate("heavy");
+          }
+        }
+      };
+
+      const gridSize = 9;
+      let cellSize = 0;
+      let gutterSize = 0;
+      let step = 0;
+      let startX = 0;
+      let startY = 0;
+
+      const config = {
+        type: Phaser.AUTO,
+        parent: "game-container",
+        width: window.innerWidth,
+        height: window.innerHeight,
+        backgroundColor: "#121216",
+        scene: { create },
+        scale: {
+          mode: Phaser.Scale.RESIZE,
+          autoCenter: Phaser.Scale.CENTER_BOTH,
+        },
+      };
+
+      const game = new Phaser.Game(config);
+
+      function create() {
+        gameScene = this;
+
+        const padding = 20;
+        const spawnerSpace = 120;
+        const maxWidth = window.innerWidth - padding * 2;
+        const maxHeight = window.innerHeight - padding * 2 - spawnerSpace;
+        const boardWidth = Math.min(maxWidth, maxHeight, 500);
+
+        cellSize = boardWidth / 11;
+        gutterSize = cellSize * 0.25;
+        step = cellSize + gutterSize;
+
+        startX = (window.innerWidth - boardWidth) / 2;
+        startY = (window.innerHeight - boardWidth - spawnerSpace) / 2 + padding;
+
+        const graphics = this.add.graphics();
+
+        for (let row = 0; row < gridSize; row++) {
+          for (let col = 0; col < gridSize; col++) {
+            const x = startX + col * step;
+            const y = startY + row * step;
+
+            graphics.fillStyle(0x23232c, 1);
+            graphics.fillRoundedRect(x, y, cellSize, cellSize, 8);
+            graphics.lineStyle(1, 0x343444, 1);
+            graphics.strokeRoundedRect(x, y, cellSize, cellSize, 8);
+
+            const hitZone = this.add.zone(
+              x + cellSize / 2,
+              y + cellSize / 2,
+              cellSize,
+              cellSize,
+            );
+            hitZone.setInteractive();
+            hitZone.on("pointerdown", () => tryMovePlayer(this, col, row));
+          }
+        }
+
+        const p1Graphics = this.make.graphics({ x: 0, y: 0, add: false });
+        p1Graphics.fillStyle(0xffc107, 1);
+        p1Graphics.fillCircle(cellSize / 2, cellSize / 2, cellSize * 0.35);
+        p1Graphics.lineStyle(3, 0xffe066, 1);
+        p1Graphics.strokeCircle(cellSize / 2, cellSize / 2, cellSize * 0.35);
+        p1Graphics.generateTexture("p1_token", cellSize, cellSize);
+
+        const p1PixelPos = getPixelPos(p1Pos.col, p1Pos.row);
+        p1Sprite = this.add.sprite(p1PixelPos.x, p1PixelPos.y, "p1_token");
+
+        const p2Graphics = this.make.graphics({ x: 0, y: 0, add: false });
+        p2Graphics.fillStyle(0x3390ec, 1);
+        p2Graphics.fillCircle(cellSize / 2, cellSize / 2, cellSize * 0.35);
+        p2Graphics.lineStyle(3, 0x66b2ff, 1);
+        p2Graphics.strokeCircle(cellSize / 2, cellSize / 2, cellSize * 0.35);
+        p2Graphics.generateTexture("p2_token", cellSize, cellSize);
+
+        const p2PixelPos = getPixelPos(p2Pos.col, p2Pos.row);
+        p2Sprite = this.add.sprite(p2PixelPos.x, p2PixelPos.y, "p2_token");
+
+        const wallLength = cellSize * 2 + gutterSize;
+        const wallThickness = gutterSize + 4;
+
+        const hGraphics = this.make.graphics({ x: 0, y: 0, add: false });
+        hGraphics.fillStyle(0xff2a2a, 1);
+        hGraphics.fillRoundedRect(
+          0,
+          0,
+          wallLength,
+          wallThickness,
+          wallThickness / 2,
+        );
+        hGraphics.generateTexture("hWall", wallLength, wallThickness);
+
+        const vGraphics = this.make.graphics({ x: 0, y: 0, add: false });
+        vGraphics.fillStyle(0xff2a2a, 1);
+        vGraphics.fillRoundedRect(
+          0,
+          0,
+          wallThickness,
+          wallLength,
+          wallThickness / 2,
+        );
+        vGraphics.generateTexture("vWall", wallThickness, wallLength);
+
+        const spawnerY = startY + boardWidth + 60;
+        const hSpawner = this.add
+          .sprite(window.innerWidth / 2 - 50, spawnerY, "hWall")
+          .setInteractive()
+          .setOrigin(0.5);
+        const vSpawner = this.add
+          .sprite(window.innerWidth / 2 + 50, spawnerY, "vWall")
+          .setInteractive()
+          .setOrigin(0.5);
+
+        this.input.setDraggable(hSpawner);
+        this.input.setDraggable(vSpawner);
+
+        let ghostWall = null;
+
+        this.input.on("dragstart", (pointer, gameObject) => {
+          if (isGameOver) return;
+          if (myRole !== "p1" && myRole !== "p2") return;
+          if (myRole !== currentTurn) {
+            safeVibrate("error");
+            return;
+          }
+
+          const myWallsLeft = myRole === "p1" ? p1Walls : p2Walls;
+          if (myWallsLeft <= 0) {
+            safeVibrate("error");
+            return;
+          }
+
+          const textureKey = gameObject.texture.key;
+          ghostWall = this.add
+            .sprite(pointer.x, pointer.y, textureKey)
+            .setOrigin(0.5);
+          ghostWall.setAlpha(0.6);
+          ghostWall.setTint(0xff8888);
+          safeVibrate("light");
+        });
+
+        this.input.on("drag", (pointer, gameObject) => {
+          if (!ghostWall || isGameOver) return;
+
+          let gCol = Math.round((pointer.x - startX - cellSize) / step);
+          let gRow = Math.round((pointer.y - startY - cellSize) / step);
+
+          gCol = Phaser.Math.Clamp(gCol, 0, gridSize - 2);
+          gRow = Phaser.Math.Clamp(gRow, 0, gridSize - 2);
+
+          const snapX = startX + gCol * step + cellSize + gutterSize / 2;
+          const snapY = startY + gRow * step + cellSize + gutterSize / 2;
+
+          ghostWall.setPosition(snapX, snapY);
+        });
+
+        this.input.on("dragend", (pointer, gameObject) => {
+          if (ghostWall && !isGameOver) {
+            const finalX = ghostWall.x;
+            const finalY = ghostWall.y;
+            const orientation = gameObject.texture.key === "hWall" ? "H" : "V";
+
+            let gCol = Math.round((finalX - startX - cellSize) / step);
+            let gRow = Math.round((finalY - startY - cellSize) / step);
+            gCol = Phaser.Math.Clamp(gCol, 0, gridSize - 2);
+            gRow = Phaser.Math.Clamp(gRow, 0, gridSize - 2);
+
+            const isOccupied = placedWalls.some(
+              (w) => w.r === gRow && w.c === gCol,
+            );
+
+            if (!isOccupied && myRole === currentTurn) {
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(
+                  JSON.stringify({
+                    type: "wall",
+                    r: gRow,
+                    c: gCol,
+                    orientation: orientation,
+                  }),
+                );
+              }
+            } else {
+              safeVibrate("error");
+            }
+
+            ghostWall.destroy();
+            ghostWall = null;
+          }
+
+          gameObject.x = gameObject.input.dragStartX;
+          gameObject.y = gameObject.input.dragStartY;
+        });
+
+        updateRoleUI();
+        updateTurnUI();
+        updateWallsUI();
+      }
+
+      function getPixelPos(col, row) {
+        return {
+          x: startX + col * step + cellSize / 2,
+          y: startY + row * step + cellSize / 2,
+        };
+      }
+
+      function getWallPixelPos(row, col) {
+        return {
+          x: startX + col * step + cellSize + gutterSize / 2,
+          y: startY + row * step + cellSize + gutterSize / 2,
+        };
+      }
+
+      function tryMovePlayer(scene, targetCol, targetRow) {
+        if (isGameOver) return;
+        if (myRole !== "p1" && myRole !== "p2") {
+          safeVibrate("error");
+          return;
+        }
+
+        if (myRole !== currentTurn) {
+          safeVibrate("error");
+          return;
+        }
+
+        const myPos = myRole === "p1" ? p1Pos : p2Pos;
+
+        const colDiff = Math.abs(targetCol - myPos.col);
+        const rowDiff = Math.abs(targetRow - myPos.row);
+
+        const isAdjacent =
+          (colDiff === 1 && rowDiff === 0) || (colDiff === 0 && rowDiff === 1);
+
+        if (isAdjacent) {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                type: "move",
+                col: targetCol,
+                row: targetRow,
+              }),
+            );
+          }
+        } else {
+          safeVibrate("error");
+        }
+      }
+    </script>
+  </body>
+</html>
